@@ -52,15 +52,19 @@ from mcp.server.fastmcp import FastMCP
 BASE = "https://www.coordinador.cl"
 
 USER_AGENT = "Mozilla/5.0 (compatible; CoordinadorDocsMCP/1.0; +https://www.coordinador.cl)"
-REQUEST_TIMEOUT = 45.0
-POLITE_DELAY = 0.25
+REQUEST_TIMEOUT = 20.0
+POLITE_DELAY = 0.05
+# Presupuesto de tiempo por crawl: nunca corre más que esto, así una búsqueda
+# en un área grande devuelve resultados parciales rápido y no deja el server
+# "pegado" bloqueando otras llamadas.
+CRAWL_TIME_BUDGET = float(os.environ.get("COORDINADOR_CRAWL_BUDGET", "20"))
 
 CACHE_DIR = Path(
     os.environ.get("COORDINADOR_CACHE_DIR", Path(tempfile.gettempdir()) / "coordinador_docs_mcp")
 )
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 INDEX_TTL = int(os.environ.get("COORDINADOR_INDEX_TTL", 24 * 3600))
-CRAWL_MAX_PAGES = int(os.environ.get("COORDINADOR_MAX_PAGES", 3000))
+CRAWL_MAX_PAGES = int(os.environ.get("COORDINADOR_MAX_PAGES", 600))
 
 # Grandes áreas de "Informes y Estudios" (todas comparten el mismo patrón).
 AREAS = [
@@ -236,7 +240,10 @@ def _crawl(root: str, max_pages: int = CRAWL_MAX_PAGES) -> list[dict]:
     prefix = _area_prefix(root)  # el crawl no sale de esta área
     n = 0
     seeded = False
+    t0 = time.monotonic()
     while cola and n < max_pages:
+        if time.monotonic() - t0 > CRAWL_TIME_BUDGET:
+            break  # presupuesto agotado: devolvemos lo indexado hasta aquí
         url, ruta = cola.pop(0)
         url = url.split("#")[0].rstrip("/")
         if url in visitados:
