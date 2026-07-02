@@ -58,6 +58,7 @@ POLITE_DELAY = 0.05
 # en un área grande devuelve resultados parciales rápido y no deja el server
 # "pegado" bloqueando otras llamadas.
 CRAWL_TIME_BUDGET = float(os.environ.get("COORDINADOR_CRAWL_BUDGET", "20"))
+# (redeploy trigger)
 
 CACHE_DIR = Path(
     os.environ.get("COORDINADOR_CACHE_DIR", Path(tempfile.gettempdir()) / "coordinador_docs_mcp")
