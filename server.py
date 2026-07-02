@@ -58,7 +58,6 @@ POLITE_DELAY = 0.05
 # en un área grande devuelve resultados parciales rápido y no deja el server
 # "pegado" bloqueando otras llamadas.
 CRAWL_TIME_BUDGET = float(os.environ.get("COORDINADOR_CRAWL_BUDGET", "20"))
-# (redeploy trigger)
 
 CACHE_DIR = Path(
     os.environ.get("COORDINADOR_CACHE_DIR", Path(tempfile.gettempdir()) / "coordinador_docs_mcp")
@@ -114,6 +113,21 @@ def _fetch_html(url: str) -> str:
 
 def _ext_of(url: str) -> str:
     return os.path.splitext(urlparse(url).path.lower())[1]
+
+
+def _year_of(d: dict) -> Optional[str]:
+    """Año del documento: de la fecha si existe; si no, del título o la URL.
+    Muchos documentos (p. ej. de Operación) no traen fecha de publicación, pero
+    su año aparece en el título ('EAF 234/2026') o en la ruta ('/2026/')."""
+    fecha = d.get("fecha") or ""
+    m = re.search(r"(\d{4})\s*$", fecha)
+    if m:
+        return m.group(1)
+    for campo in (d.get("titulo", ""), d.get("url", "")):
+        m = re.search(r"(20\d{2})", campo)
+        if m:
+            return m.group(1)
+    return None
 
 
 def _is_doc_link(text: str, url: str) -> bool:
@@ -234,16 +248,21 @@ def _index_path(root: str) -> Path:
     return CACHE_DIR / f"index_{slug}.json"
 
 
-def _crawl(root: str, max_pages: int = CRAWL_MAX_PAGES) -> list[dict]:
+def _crawl(root: str, max_pages: int = CRAWL_MAX_PAGES) -> tuple[list[dict], bool]:
+    """Recorre el árbol del área. Devuelve (documentos, parcial). 'parcial' es
+    True si el recorrido se detuvo por el presupuesto de tiempo o de páginas
+    antes de vaciar la cola (quedó árbol sin visitar)."""
     docs: list[dict] = []
     visitados: set[str] = set()
     cola: list[tuple[str, list[str]]] = [(root, [])]
     prefix = _area_prefix(root)  # el crawl no sale de esta área
     n = 0
     seeded = False
+    parcial = False
     t0 = time.monotonic()
     while cola and n < max_pages:
         if time.monotonic() - t0 > CRAWL_TIME_BUDGET:
+            parcial = True
             break  # presupuesto agotado: devolvemos lo indexado hasta aquí
         url, ruta = cola.pop(0)
         url = url.split("#")[0].rstrip("/")
@@ -273,20 +292,27 @@ def _crawl(root: str, max_pages: int = CRAWL_MAX_PAGES) -> list[dict]:
                     "pagina": url,
                 })
         time.sleep(POLITE_DELAY)
-    return docs
+    if cola:
+        parcial = True  # quedó árbol sin visitar
+    return docs, parcial
 
 
-def _get_index(root: str, refrescar: bool = False) -> list[dict]:
+def _get_index(root: str, refrescar: bool = False) -> tuple[list[dict], bool]:
+    """Devuelve (documentos, parcial), usando caché válida ~24 h."""
     path = _index_path(root)
     if not refrescar and path.exists():
         if time.time() - path.stat().st_mtime < INDEX_TTL:
             try:
-                return json.loads(path.read_text(encoding="utf-8"))
+                cache = json.loads(path.read_text(encoding="utf-8"))
+                return cache.get("docs", []), cache.get("parcial", False)
             except Exception:
                 pass
-    docs = _crawl(root)
-    path.write_text(json.dumps(docs, ensure_ascii=False), encoding="utf-8")
-    return docs
+    docs, parcial = _crawl(root)
+    path.write_text(
+        json.dumps({"docs": docs, "parcial": parcial}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return docs, parcial
 
 
 # --------------------------------------------------------------------------- #
@@ -349,32 +375,48 @@ def _leer_csv_txt(content: bytes, max_chars: int) -> dict:
     return {"tipo": "texto", "texto": texto[:max_chars]}
 
 
-def _leer_zip(content: bytes, max_chars: int) -> dict:
+def _leer_zip(content: bytes, max_chars: int, archivo: Optional[str] = None) -> dict:
+    """Sin 'archivo': lista lo que trae el ZIP (nombre, tamaño, formato) sin
+    volcar contenido. Con 'archivo': extrae y lee ese archivo interno."""
     zf = zipfile.ZipFile(io.BytesIO(content))
-    nombres = zf.namelist()
-    resultado = {"tipo": "zip", "archivos": nombres, "contenido": {}}
-    total = 0
-    for nombre in nombres:
-        ext = os.path.splitext(nombre.lower())[1]
-        if ext not in (".pdf", ".xlsx", ".csv", ".txt"):
-            continue
-        try:
-            data = zf.read(nombre)
-            if ext == ".pdf":
-                sub = _leer_pdf(data, None, max_chars // 2)
-            elif ext == ".xlsx":
-                sub = _leer_xlsx(data, max_chars // 2)
-            else:
-                sub = _leer_csv_txt(data, max_chars // 2)
-            texto = sub.get("texto", "")
-            resultado["contenido"][nombre] = texto[: max_chars // 2]
-            total += len(texto)
-            if total >= max_chars:
-                resultado["contenido"]["_nota"] = "truncado"
-                break
-        except Exception as e:
-            resultado["contenido"][nombre] = f"[no se pudo leer: {e}]"
-    return resultado
+    infos = zf.infolist()
+
+    if archivo is None:
+        return {
+            "tipo": "zip",
+            "n_archivos": len(infos),
+            "archivos": [
+                {"nombre": i.filename, "bytes": i.file_size,
+                 "formato": os.path.splitext(i.filename.lower())[1].lstrip(".")}
+                for i in infos if not i.is_dir()
+            ],
+            "nota": "Para leer uno, llama leer_documento con archivo_zip=<nombre>.",
+        }
+
+    # Buscar el archivo interno (coincidencia exacta o por sufijo/nombre)
+    candidatos = [i.filename for i in infos if not i.is_dir()]
+    elegido = next(
+        (n for n in candidatos if n == archivo or n.endswith("/" + archivo)
+         or os.path.basename(n) == archivo),
+        None,
+    )
+    if elegido is None:
+        return {"tipo": "zip", "error": f"'{archivo}' no está en el ZIP.",
+                "archivos": [i.filename for i in infos if not i.is_dir()]}
+
+    data = zf.read(elegido)
+    ext = os.path.splitext(elegido.lower())[1]
+    if ext == ".pdf":
+        sub = _leer_pdf(data, None, max_chars)
+    elif ext in (".xlsx", ".xlsm"):
+        sub = _leer_xlsx(data, max_chars)
+    elif ext in (".csv", ".txt"):
+        sub = _leer_csv_txt(data, max_chars)
+    else:
+        sub = {"tipo": ext.lstrip("."), "nota": "Formato no legible como texto.",
+               "bytes": len(data)}
+    sub["archivo_zip"] = elegido
+    return sub
 
 
 # --------------------------------------------------------------------------- #
@@ -514,16 +556,20 @@ def buscar_documentos(
     Args:
         consulta: términos a buscar (p. ej. "informe final", "EAF", "costo marginal").
         seccion: URL del área o sección donde buscar (de listar_areas / listar_secciones).
-        anio: filtra por año de publicación.
+        anio: filtra por año (de la fecha, o del título/URL si no hay fecha).
         formato: filtra por extensión (p. ej. "pdf", "xlsx", "zip").
         limite: máximo de resultados (por defecto 30).
         refrescar_indice: fuerza reconstruir el índice.
+
+    Nota: en áreas grandes la primera pasada indexa dentro de un presupuesto de
+    tiempo; si el resultado trae "indice_parcial": true, acota con una URL de
+    listar_secciones o usa refrescar_indice para profundizar.
     """
     root = seccion.strip()
     if not root.startswith("http"):
         root = urljoin(BASE, root)
     try:
-        docs = _get_index(root, refrescar=refrescar_indice)
+        docs, parcial = _get_index(root, refrescar=refrescar_indice)
     except Exception as e:
         return json.dumps({"error": f"No se pudo construir el índice: {e}"}, ensure_ascii=False)
 
@@ -533,7 +579,7 @@ def buscar_documentos(
         blob = f"{d.get('titulo','')} {d.get('seccion','')}".lower()
         if not all(t in blob for t in terminos):
             return False
-        if anio is not None and not (d.get("fecha") or "").endswith(str(anio)):
+        if anio is not None and _year_of(d) != str(anio):
             return False
         if formato is not None and (d.get("formato") or "").lower() != formato.lower().lstrip("."):
             return False
@@ -543,26 +589,35 @@ def buscar_documentos(
 
     def clave(d):
         m = re.match(r"(\d{2})/(\d{2})/(\d{4})", d.get("fecha") or "")
-        return (m.group(3), m.group(2), m.group(1)) if m else ("0000", "00", "00")
+        if m:
+            return (m.group(3), m.group(2), m.group(1))
+        return (_year_of(d) or "0000", "00", "00")  # sin fecha: ordena por año inferido
 
     resultados.sort(key=clave, reverse=True)
     return json.dumps(
         {"consulta": consulta, "seccion": root, "total_indexado": len(docs),
-         "coincidencias": len(resultados), "resultados": resultados[: max(1, int(limite))]},
+         "indice_parcial": parcial, "coincidencias": len(resultados),
+         "resultados": resultados[: max(1, int(limite))]},
         ensure_ascii=False, indent=2,
     )
 
 
 @mcp.tool()
-def leer_documento(url: str, paginas: Optional[str] = None, max_chars: int = 60000) -> str:
+def leer_documento(
+    url: str,
+    paginas: Optional[str] = None,
+    archivo_zip: Optional[str] = None,
+    max_chars: int = 60000,
+) -> str:
     """
     Descarga y lee un archivo del Coordinador. Soporta PDF, XLSX/XLSM, CSV, TXT
-    y ZIP (extrae y lee lo que haya dentro). Para otros formatos devuelve solo
-    los metadatos.
+    y ZIP. Para un ZIP, por defecto LISTA los archivos que contiene; para leer
+    uno, pásalo en 'archivo_zip'. Para otros formatos devuelve solo metadatos.
 
     Args:
         url: URL directa del archivo (campo "url" de un documento).
         paginas: solo PDF; rango como "1-5" o "3".
+        archivo_zip: nombre de un archivo dentro del ZIP para extraer y leer.
         max_chars: tope de caracteres devueltos.
     """
     url = url.strip()
@@ -582,7 +637,7 @@ def leer_documento(url: str, paginas: Optional[str] = None, max_chars: int = 600
         elif ext in (".csv", ".txt"):
             out = _leer_csv_txt(content, max_chars)
         elif ext == ".zip":
-            out = _leer_zip(content, max_chars)
+            out = _leer_zip(content, max_chars, archivo=archivo_zip)
         else:
             out = {"tipo": ext.lstrip("."), "nota": "Formato no legible como texto; solo descarga.",
                    "bytes": len(content)}

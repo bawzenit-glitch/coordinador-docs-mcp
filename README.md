@@ -20,8 +20,8 @@ Parámetros Operacionales · Auditorías Técnicas · Normativa Sectorial.
 | `listar_secciones(area)` | Categorías dentro de un área. |
 | `explorar(url)` | Subcarpetas y documentos de una página (título, fecha, **formato**, enlace). |
 | `arbol(url, profundidad)` | Árbol anidado de una sección. |
-| `buscar_documentos(consulta, seccion, anio, formato, limite)` | Busca por título; filtra por año y formato. |
-| `leer_documento(url, paginas)` | Lee **PDF, XLSX/XLSM, CSV, TXT y ZIP** (extrae y lee su contenido). |
+| `buscar_documentos(consulta, seccion, anio, formato, limite)` | Busca por título; filtra por año (de la fecha o del título/URL) y formato. Avisa con `indice_parcial` si el área es grande. |
+| `leer_documento(url, paginas, archivo_zip)` | Lee **PDF, XLSX/XLSM, CSV, TXT**. Para un **ZIP** lista sus archivos; con `archivo_zip` lee uno específico. |
 
 ## Despliegue (igual que el primero)
 
@@ -34,7 +34,8 @@ Parámetros Operacionales · Auditorías Técnicas · Normativa Sectorial.
 ## Notas
 
 - Solo lectura de información pública. Sin autenticación.
-- Áreas grandes (Operación) pueden tardar en la primera búsqueda (construye
-  índice); luego cachea ~24 h. Acota con `listar_secciones` y busca por sección.
+- La búsqueda indexa dentro de un **presupuesto de tiempo** (~20 s) para no
+  colgarse en áreas grandes; si devuelve `indice_parcial: true`, acota con
+  `listar_secciones` o usa `refrescar_indice`. El índice cachea ~24 h.
 - No cubre: portales con login, el Portal API (datos estructurados) ni OCR de
   PDFs escaneados. Eso sería un conector aparte.
