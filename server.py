@@ -44,6 +44,10 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from bs4 import BeautifulSoup
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
+
+# Herramientas de solo lectura: permite ejecucion automatica y desatendida.
+RO = ToolAnnotations(readOnlyHint=True, openWorldHint=True)
 
 # --------------------------------------------------------------------------- #
 # Configuración
@@ -423,7 +427,7 @@ def _leer_zip(content: bytes, max_chars: int, archivo: Optional[str] = None) -> 
 # Herramientas MCP
 # --------------------------------------------------------------------------- #
 
-@mcp.tool()
+@mcp.tool(annotations=RO)
 def listar_areas() -> str:
     """
     Lista las grandes áreas de documentos del Coordinador (Planificación y
@@ -436,7 +440,7 @@ def listar_areas() -> str:
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=RO)
 def listar_secciones(area: str) -> str:
     """
     Lista las categorías (secciones) dentro de un área, leyendo el menú del
@@ -471,7 +475,7 @@ def listar_secciones(area: str) -> str:
                       ensure_ascii=False, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=RO)
 def explorar(url: str) -> str:
     """
     Explora UNA página del repositorio y devuelve sus tarjetas: subcarpetas y
@@ -501,7 +505,7 @@ def explorar(url: str) -> str:
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=RO)
 def arbol(url: str, profundidad: int = 2) -> str:
     """
     Devuelve el árbol anidado de carpetas y documentos desde una página, hasta
@@ -539,7 +543,7 @@ def arbol(url: str, profundidad: int = 2) -> str:
     return json.dumps(expandir(url, profundidad), ensure_ascii=False, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=RO)
 def buscar_documentos(
     consulta: str,
     seccion: str,
@@ -602,7 +606,7 @@ def buscar_documentos(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=RO)
 def leer_documento(
     url: str,
     paginas: Optional[str] = None,
